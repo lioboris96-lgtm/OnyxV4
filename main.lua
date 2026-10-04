@@ -78,7 +78,7 @@ local function downloadFile(path, func)
             downloader.Text = `Downloading {path}`
         end
         local suc, res =  pcall(function()
-            return game:HttpGet(`https://raw.githubusercontent.com/wrj80z/OnyxV4/{readfile('onyx/profiles/commit.txt')}/{select(1, path:gsub('onyx/', ''))}`, true)
+            return game:HttpGet(`https://raw.githubusercontent.com/lioboris96-lgtm/OnyxV4/{readfile('onyx/profiles/commit.txt')}/{select(1, path:gsub('onyx/', ''))}`, true)
         end)
         if not suc or res == '404: Not Found' then
             error(res)
@@ -115,7 +115,7 @@ local function finishLoading()
                     local key = '_key'
                     print(key)
                 else
-                    loadstring(game:HttpGet("https://raw.githubusercontent.com/wrj80z/OnyxV4/main/init.lua", true))(config)                    local key = '_key'
+                    loadstring(game:HttpGet("https://raw.githubusercontent.com/lioboris96-lgtm/OnyxV4/main/init.lua", true))(config)                    local key = '_key'
                     print(key)
                     -- todo make it get to the api w key
                 end
@@ -177,7 +177,7 @@ if not shared.VapeIndependent then
 	else
 		if not shared.VapeDeveloper then
 			local suc, res = pcall(function()
-				return game:HttpGet('https://raw.githubusercontent.com/wrj80z/OnyxV4/'..readfile('onyx/profiles/commit.txt')..'/games/'..game.PlaceId..'.lua', true)
+				return game:HttpGet('https://raw.githubusercontent.com/lioboris96-lgtm/OnyxV4/'..readfile('onyx/profiles/commit.txt')..'/games/'..game.PlaceId..'.lua', true)
 			end)
 			if suc and res ~= '404: Not Found' then
 				loadstring(downloadFile('onyx/games/'..game.PlaceId..'.lua'), tostring(game.PlaceId))(Headers)

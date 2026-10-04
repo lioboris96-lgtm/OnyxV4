@@ -22,7 +22,7 @@ end
 local function downloadFile(path, func)
 	if not isfile(path) then
 		local suc, res = pcall(function() 
-			return game:HttpGet('https://raw.githubusercontent.com/wrj80z/OnyxV4/'..readfile('onyx/profiles/commit.txt')..'/'..select(1, path:gsub('onyx/', '')), true) 
+			return game:HttpGet('https://raw.githubusercontent.com/lioboris96-lgtm/OnyxV4/'..readfile('onyx/profiles/commit.txt')..'/'..select(1, path:gsub('onyx/', '')), true) 
 		end)
 		if not suc or res == '404: Not Found' then 
 			error(res) 
@@ -41,7 +41,7 @@ if isfile('onyx/games/'..vape.Place..'.lua') then
 else
 	if not shared.VapeDeveloper then
 		local suc, res = pcall(function() 
-			return game:HttpGet('https://raw.githubusercontent.com/wrj80z/OnyxV4/'..readfile('onyx/profiles/commit.txt')..'/games/'..vape.Place..'.lua', true) 
+			return game:HttpGet('https://raw.githubusercontent.com/lioboris96-lgtm/OnyxV4/'..readfile('onyx/profiles/commit.txt')..'/games/'..vape.Place..'.lua', true) 
 		end)
 		if suc and res ~= '404: Not Found' then
 			loadstring(downloadFile('onyx/games/'..vape.Place..'.lua'), 'bedwars')(Headers)

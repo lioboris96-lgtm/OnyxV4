@@ -45,7 +45,7 @@ local function downloadFile(path, func)
             downloader.Text = `Downloading {path}`
         end
         local suc, res = pcall(function()
-            return game:HttpGet(`https://raw.githubusercontent.com/wrj80z/OnyxV4/{readfile('onyx/profiles/commit.txt')}/{select(1, path:gsub('onyx/', ''))}`, true)
+            return game:HttpGet(`https://raw.githubusercontent.com/lioboris96-lgtm/OnyxV4/{readfile('onyx/profiles/commit.txt')}/{select(1, path:gsub('onyx/', ''))}`, true)
         end)
         if not suc or res == '404: Not Found' then
             error(res)
@@ -89,7 +89,7 @@ if not shared.VapeDeveloper then
     local com = Headers.Commit or nil
     if not com then
         local _, res = pcall(function()
-            return game:HttpGet('https://github.com/wrj80z/OnyxV4')
+            return game:HttpGet('https://github.com/lioboris96-lgtm/OnyxV4')
         end)
         com = res:find('currentOid')
         com = com and res:sub(com + 13, com + 52) or nil
