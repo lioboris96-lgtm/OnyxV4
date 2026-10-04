@@ -1,4 +1,85 @@
-local canDebug = true
+local canDebug = (debug ~= nil and debug.getupvalue ~= nil)
+-- safe wrappers: executor debug/require often restricted, game updates rename keys
+local function safeGetUpvalue(func, idx, fallback)
+	if not canDebug or type(func) ~= 'function' or type(debug) ~= 'table' or type(debug.getupvalue) ~= 'function' then return fallback end
+	local ok, res = pcall(debug.getupvalue, func, idx)
+	if not ok or res == nil then return fallback end
+	return res
+end
+local function safeRequire(path, key)
+	local ok, mod = pcall(function()
+		local m = require(path)
+		if key ~= nil then
+			if type(m) == 'table' then return m[key] else return nil end
+		end
+		return m
+	end)
+	if not ok then return {} end
+	if mod == nil then return {} end
+	return mod
+end
+local function safeResolve(flamework, id)
+	if not flamework or not flamework.resolveDependency then return nil end
+	local ok, res = pcall(flamework.resolveDependency, id)
+	if not ok then return nil end
+	return res
+end
+-- scan upvalues for a table containing ALL of the given keys (fixes hardcoded index drift)
+local function scanUpvalue(fn, keys)
+	if not canDebug or type(fn) ~= 'function' then return nil end
+	for i = 1, 20 do
+		local ok, val = pcall(debug.getupvalue, fn, i)
+		if not ok then break end
+		if type(val) == 'table' then
+			local hit = true
+			for _, k in ipairs(keys) do
+				if val[k] == nil then hit = false break end
+			end
+			if hit then return val end
+		end
+	end
+	return nil
+end
+local function safeCall(fn, ...)
+	if type(fn) ~= 'function' then return nil end
+	local ok, res = pcall(fn, ...)
+	if not ok then return nil end
+	return res
+end
+-- blocks below run async; wait for bedwars table before touching it
+local function waitBedwars(timeout)
+	local t0 = os.clock()
+	while (getgenv().bedwars == nil and _G.bedwarsReady == nil) do
+		if timeout and os.clock() - t0 > timeout then return nil end
+		task.wait(0.1)
+	end
+	return getgenv().bedwars or _G.bedwarsReady
+end
+-- early dummy so async blocks never see nil bedwars before init finishes
+do
+	if getgenv().bedwars == nil then
+		local dummyRemoteInstance = {OnClientEvent = Instance.new('BindableEvent').Event}
+		local dummyRemote = setmetatable({instance = dummyRemoteInstance}, {__index = function(_, k)
+			if k == 'instance' then return dummyRemoteInstance end
+			return function() end
+		end})
+		local dummyClient = setmetatable({}, {__index = function()
+			return function(_, ...)
+				return dummyRemote
+			end
+		end})
+		getgenv().bedwars = setmetatable({
+			Client = dummyClient,
+			CombatConstant = setmetatable({}, {__index = function() return 14.4 end}),
+			SharedConstants = setmetatable({}, {__index = function() return 12 end}),
+			ItemMeta = {}, BedwarsKitSkin = {}, TeamUpgradeMeta = {},
+			BedBreakEffectMeta = {}, KillEffectMeta = {}, WinEffectMeta = {},
+			QueueCard = {}, BowConstantsTable = {RelX = 0, RelY = 0, RelZ = 0},
+		}, {__index = function() return function() end})
+	end
+	-- NOTE: do NOT assign to bare `bedwars` here; line ~239 declares it local.
+	-- That local is initialized from getgenv below so async blocks share one table.
+end
 local run = function(func)
     local suc, res = pcall(function()
         task.spawn(func)
@@ -156,7 +237,7 @@ local HitBoxes = {}
 local InfiniteFly = {}
 local TrapDisabler
 local AntiFallPart
-local bedwars, remotes, sides, oldinvrender, oldSwing = {}, {}, {}
+local bedwars, remotes, sides, oldinvrender, oldSwing = getgenv().bedwars or {}, {}, {}, nil, nil
 
 local function addBlur(parent)
 	local blur = Instance.new('ImageLabel')
@@ -259,7 +340,10 @@ local function getItem(itemName, inv, find)
 end
 
 local function getRoactRender(func)
-	return debug.getupvalue(debug.getupvalue(debug.getupvalue(func, 3).render, 2).render, 1)
+	local a = safeGetUpvalue(func, 3, nil)
+	a = a and safeGetUpvalue(a.render, 2, nil)
+	a = a and safeGetUpvalue(a.render, 1, nil)
+	return a
 end
 
 local function getSword()
@@ -948,13 +1032,25 @@ run(function()
 		task.wait()
 	until KnitInit
 
-	if canDebug and not debug.getupvalue(Knit.Start, 1) then
-		repeat task.wait() until debug.getupvalue(Knit.Start, 1)
+	if canDebug and not safeGetUpvalue(Knit.Start, 1, nil) then
+		local t0 = os.clock()
+		repeat task.wait() until safeGetUpvalue(Knit.Start, 1, nil) ~= nil or os.clock() - t0 > 15
 	end
 	
-	local Flamework = require(replicatedStorage['rbxts_include']['node_modules']['@flamework'].core.out).Flamework
+	local Flamework = safeRequire(replicatedStorage['rbxts_include']['node_modules']['@flamework'].core.out)
+	Flamework = Flamework.Flamework or Flamework
 	local InventoryUtil = require(replicatedStorage.TS.inventory['inventory-util']).InventoryUtil
-	local Client = require(replicatedStorage.TS.remotes).default.Client
+	local Client = safeRequire(replicatedStorage.TS.remotes).default and safeRequire(replicatedStorage.TS.remotes).default.Client or nil
+	if type(Client) ~= 'table' or type(Client.Get) ~= 'function' then
+		local dummyInst2 = {OnClientEvent = {Connect = function() return {Disconnect = function() end} end}}
+		Client = setmetatable({}, {__index = function(_, k)
+			if k == 'Get' then return function(_) return setmetatable({instance = dummyInst2}, {__index = function(_, k2)
+				if k2 == 'instance' then return dummyInst2 end
+				return function() return nil end
+			end}) end end
+			return function() return nil end
+		end})
+	end
 	local OldGet, OldBreak = Client.Get, nil
 
 	bedwars = setmetatable({
@@ -969,13 +1065,13 @@ run(function()
 		AppController = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out.client.controllers['app-controller']).AppController,
 		BedBreakEffectMeta = require(replicatedStorage.TS.locker['bed-break-effect']['bed-break-effect-meta']).BedBreakEffectMeta,
 		BedwarsKitMeta = require(replicatedStorage.TS.games.bedwars.kit['bedwars-kit-meta']).BedwarsKitMeta,
-		BedwarsKitSkin = canDebug and debug.getupvalue(require(replicatedStorage.TS.games.bedwars['kit-skin']['bedwars-kit-skin-meta']).getKitSkinMetadata, 1) or {},
+		BedwarsKitSkin = safeGetUpvalue(safeRequire(replicatedStorage.TS.games.bedwars['kit-skin']['bedwars-kit-skin-meta']).getKitSkinMetadata, 1, {}),
 		BlockBreaker = Knit.Controllers.BlockBreakController.blockBreaker,
 		BlockController = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['block-engine'].out).BlockEngine,
 		BlockEngine = require(lplr.PlayerScripts.TS.lib['block-engine']['client-block-engine']).ClientBlockEngine,
 		BlockPlacer = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['block-engine'].out.client.placement['block-placer']).BlockPlacer,
 		BlockSelector = require(replicatedStorage.rbxts_include.node_modules['@easy-games']['block-engine'].out.client.select['block-selector']).BlockSelector,
-		BowConstantsTable = canDebug and debug.getupvalue(Knit.Controllers.ProjectileController.enableBeam, 8) or {RelX = 0, RelY = 0, RelZ = 0},
+		BowConstantsTable = scanUpvalue(Knit.Controllers.ProjectileController and Knit.Controllers.ProjectileController.enableBeam, {'RelX', 'RelY', 'RelZ'}) or safeGetUpvalue(Knit.Controllers.ProjectileController and Knit.Controllers.ProjectileController.enableBeam, 5, nil) or safeGetUpvalue(Knit.Controllers.ProjectileController and Knit.Controllers.ProjectileController.enableBeam, 8, {RelX = 0, RelY = 0, RelZ = 0}) or {RelX = 0, RelY = 0, RelZ = 0},
 		ClickHold = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out.client.ui.lib.util['click-hold']).ClickHold,
 		Client = Client,
 		ClientConstructor = require(replicatedStorage['rbxts_include']['node_modules']['@rbxts'].net.out.client),
@@ -1016,16 +1112,16 @@ run(function()
 		QueueMeta = require(replicatedStorage.TS.game['queue-meta']).QueueMeta,
 		Roact = require(replicatedStorage['rbxts_include']['node_modules']['@rbxts']['roact'].src),
 		RankMeta = require(replicatedStorage.TS.rank['rank-meta']).RankMeta,
-		RecipeMeta = canDebug and debug.getupvalue(require(replicatedStorage.TS.recipe['recipe-meta']).getRecipeMeta, 1) or {},
+		RecipeMeta = safeCall(safeRequire(replicatedStorage.TS.recipe['recipe-meta']).getRecipeMeta) or safeGetUpvalue(safeRequire(replicatedStorage.TS.recipe['recipe-meta']).getRecipeMeta, 1, {}),
 		RuntimeLib = require(replicatedStorage['rbxts_include'].RuntimeLib),
 		SummonerKitBalance = require(replicatedStorage.TS.games.bedwars.kit.kits.summoner['summoner-kit-balance']).SummonerKitBalance,
 		StatusEffectUtil = require(replicatedStorage.TS['status-effect']['status-effect-util']).StatusEffectUtil,
 		StatusEffectMeta = require(replicatedStorage.TS['status-effect']['status-effect-type']).StatusEffectType,
-		SharedConstants = canDebug and require(replicatedStorage.TS['shared-constants']).CpsConstants or {},
+		SharedConstants = safeRequire(replicatedStorage.TS['shared-constants']).CpsConstants or safeRequire(replicatedStorage.TS.shared['shared-constants']).CpsConstants or {},
 		SoundList = require(replicatedStorage.TS.sound['game-sound']).GameSound,
 		SoundManager = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).SoundManager,
 		Store = require(lplr.PlayerScripts.TS.ui.store).ClientStore,
-		TeamUpgradeMeta = canDebug and debug.getupvalue(require(replicatedStorage.TS.games.bedwars['team-upgrade']['team-upgrade-meta']).getTeamUpgradeMetaForQueue, 7) or {},
+		TeamUpgradeMeta = safeCall(safeRequire(replicatedStorage.TS.games.bedwars['team-upgrade']['team-upgrade-meta']).getTeamUpgradeMetaForQueue) or safeCall(safeRequire(replicatedStorage.TS.games.bedwars['team-upgrade']['team-upgrade-meta']).getSortedTeamUpgrades) or safeGetUpvalue(safeRequire(replicatedStorage.TS.games.bedwars['team-upgrade']['team-upgrade-meta']).getTeamUpgradeMetaForQueue, 7, {}),
 		UILayers = require(replicatedStorage['rbxts_include']['node_modules']['@easy-games']['game-core'].out).UILayers,
 		VisualizerUtils = require(lplr.PlayerScripts.TS.lib.visualizer['visualizer-utils']).VisualizerUtils,
 		WeldTable = require(replicatedStorage.TS.util['weld-util']).WeldUtil,
@@ -1038,6 +1134,55 @@ run(function()
 		end
 	})
 	getgenv().bedwars = bedwars
+	_G.bedwarsReady = bedwars
+	-- safety net: game updates / executor restrictions leave fields nil; dummy instead of error
+	do
+		local dummyRemoteInstance = {OnClientEvent = Instance.new('BindableEvent').Event}
+		local dummyRemote = setmetatable({instance = dummyRemoteInstance}, {__index = function(_, k)
+			if k == 'instance' then return dummyRemoteInstance end
+			return function() end
+		end})
+		local dummyClient = setmetatable({}, {__index = function(_, k)
+			return function(_, ...)
+				return dummyRemote
+			end
+		end})
+		if type(bedwars.Client) ~= 'table' then bedwars.Client = dummyClient end
+		if type(bedwars.CombatConstant) ~= 'table' then bedwars.CombatConstant = setmetatable({}, {__index = function() return 14.4 end}) end
+		if type(bedwars.SharedConstants) ~= 'table' then bedwars.SharedConstants = setmetatable({}, {__index = function() return 12 end}) end
+		if type(bedwars.ItemMeta) ~= 'table' then bedwars.ItemMeta = {} end
+		if type(bedwars.BedwarsKitSkin) ~= 'table' then bedwars.BedwarsKitSkin = {} end
+		if type(bedwars.TeamUpgradeMeta) ~= 'table' then bedwars.TeamUpgradeMeta = {} end
+		if type(bedwars.BedBreakEffectMeta) ~= 'table' then bedwars.BedBreakEffectMeta = {} end
+		if type(bedwars.KillEffectMeta) ~= 'table' then bedwars.KillEffectMeta = {} end
+		if type(bedwars.WinEffectMeta) ~= 'table' then bedwars.WinEffectMeta = {} end
+		if type(bedwars.QueueCard) ~= 'table' then bedwars.QueueCard = {} end
+		if type(bedwars.BowConstantsTable) ~= 'table' then bedwars.BowConstantsTable = {RelX = 0, RelY = 0, RelZ = 0} end
+		if type(bedwars.getIcon) ~= 'function' then
+			bedwars.getIcon = function(item, showinv)
+				local ok, meta = pcall(function() return bedwars.ItemMeta[(item or {}).itemType] end)
+				return (ok and meta and showinv and meta.image) or ''
+			end
+		end
+		-- dummy item: bedwars.ItemMeta[anything].anything must never throw (fixes indexSearch + all meta chains)
+		do
+			local dummyItem
+			dummyItem = setmetatable({image = '', displayName = '', sword = {}, block = {}, projectileSource = {}, breakBlock = setmetatable({}, {__index = function() return 2 end})}, {__index = function(_, k)
+				if k == 'breakBlock' then return setmetatable({}, {__index = function() return 2 end}) end
+				if k == 'sword' or k == 'block' or k == 'projectileSource' then return {} end
+				return ''
+			end})
+			if type(bedwars.ItemMeta) == 'table' and getmetatable(bedwars.ItemMeta) == nil then
+				setmetatable(bedwars.ItemMeta, {__index = function() return dummyItem end})
+			end
+		end
+		if type(bedwars.SharedConstants) == 'table' and bedwars.SharedConstants.BLOCK_PLACE_CPS == nil then
+			bedwars.SharedConstants.BLOCK_PLACE_CPS = 12
+		end
+		if type(bedwars.getInventory) ~= 'function' then
+			bedwars.getInventory = function() return {items = {}, armor = {}} end
+		end
+	end
 	
 	store.enchants = setmetatable({}, {
 		__index = function(self, plr)
@@ -1198,7 +1343,7 @@ run(function()
 		DragonFly = Knit.Controllers.VoidDragonController.flapWings or function() end,
 		DropItem = Knit.Controllers.ItemDropController.dropItemInHand or function() end,
 		EquipItem = getproto(require(replicatedStorage.TS.entity.entities['inventory-entity']).InventoryEntity.equipItem, 4) or function() end,
-		FireProjectile = debug.getupvalue(Knit.Controllers.ProjectileController.launchProjectileWithValues, 2) or function() end,
+		FireProjectile = safeGetUpvalue(Knit.Controllers.ProjectileController and Knit.Controllers.ProjectileController.launchProjectileWithValues, 2, function() end),
 		GroundHit = Knit.Controllers.FallDamageController.KnitStart or function() end,
 		GuitarHeal = Knit.Controllers.GuitarController.performHeal or function() end,
 		HannahKill = getproto(Knit.Controllers.HannahController.registerExecuteInteractions, 1) or function() end,
@@ -1269,8 +1414,17 @@ run(function()
         return OldHit(...)
     end
 	if canDebug then
+		local dummyEvt = {Connect = function() return {Disconnect = function() end} end}
+		local dummyInst = {OnClientEvent = dummyEvt}
+		local function dummyRemote()
+			return setmetatable({instance = dummyInst}, {__index = function(_, k)
+				if k == 'instance' then return dummyInst end
+				return function() return nil end
+			end})
+		end
 		Client.Get = function(self, remoteName)
-			local call = OldGet(self, remoteName)
+			local ok, call = pcall(OldGet, self, remoteName)
+			if not ok or call == nil then return dummyRemote() end
 
 			if remoteName == remotes.AttackEntity then
 				return {
@@ -1695,7 +1849,7 @@ run(function()
 			setthreadidentity(2)
 
 			bedwars.Shop = require(replicatedStorage.TS.games.bedwars.shop['bedwars-shop']).BedwarsShop
-			bedwars.ShopItems = debug.getupvalue(debug.getupvalue(bedwars.Shop.getShopItem, 1), 2)
+			do local a = safeGetUpvalue(bedwars.Shop.getShopItem, 1, nil); a = a and safeGetUpvalue(a, 2, nil); if a then bedwars.ShopItems = a end end
 			bedwars.Shop.getShopItem('iron_sword', lplr)
 
 			setthreadidentity(old)
@@ -1707,7 +1861,7 @@ run(function()
 				until vape.Loaded == nil or bedwars.AppController:isAppOpen('BedwarsItemShopApp')
 
 				bedwars.Shop = require(replicatedStorage.TS.games.bedwars.shop['bedwars-shop']).BedwarsShop
-				bedwars.ShopItems = debug.getupvalue(debug.getupvalue(bedwars.Shop.getShopItem, 1), 2)
+				do local a = safeGetUpvalue(bedwars.Shop.getShopItem, 1, nil); a = a and safeGetUpvalue(a, 2, nil); if a then bedwars.ShopItems = a end end
 				store.shopLoaded = true
 			end)
 		end
@@ -2197,7 +2351,7 @@ run(function()
 		Name = 'Reach',
 		Tooltip = 'Allows you to attack further',
 		Function = function(callback)
-			bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = callback and SwordRange.Value + 2 or 14.4
+			if bedwars.CombatConstant then bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = callback and SwordRange.Value + 2 or 14.4 end
 		end
 	})
 	SwordRange = Reach:CreateSlider({
@@ -2211,7 +2365,7 @@ run(function()
 			return val <= 1 and 'stud' or 'studs'
 		end,
 		Function = function(val)
-			bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = Reach.Enabled and val or 14.4
+			if bedwars.CombatConstant then bedwars.CombatConstant.RAYCAST_SWORD_CHARACTER_DISTANCE = Reach.Enabled and val or 14.4 end
 		end,
 	})
 end)
@@ -2886,7 +3040,12 @@ run(function()
 		end
 	}
 	task.spawn(function()
-		AttackRemote = bedwars.Client:Get(remotes.AttackEntity)
+		waitBedwars(30)
+		local bw = getgenv().bedwars or bedwars
+		if bw and bw.Client and bw.Client.Get then
+			local ok, res = pcall(bw.Client.Get, bw.Client, remotes.AttackEntity)
+			if ok and res then AttackRemote = res end
+		end
 	end)
 	local function getAttackData()
         if Mouse.Enabled then
@@ -3439,7 +3598,12 @@ run(function()
 		end
 	}
 	task.spawn(function()
-		projectileRemote = bedwars.Client:Get(remotes.FireProjectile).instance
+		waitBedwars(30)
+		local bw = getgenv().bedwars or bedwars
+		if bw and bw.Client and bw.Client.Get then
+			local ok, res = pcall(bw.Client.Get, bw.Client, remotes.FireProjectile)
+			if ok and res and res.instance then projectileRemote = res.instance end
+		end
 	end)
 	local function launchProjectile(item, pos, proj, speed, dir)
 		if not pos then
@@ -3925,7 +4089,12 @@ run(function()
 	local projectileCooldown = 0
 	local FireDelays = {}
 	task.spawn(function()
-		projectileRemote = bedwars.Client:Get(remotes.FireProjectile).instance
+		waitBedwars(30)
+		local bw = getgenv().bedwars or bedwars
+		if bw and bw.Client and bw.Client.Get then
+			local ok, res = pcall(bw.Client.Get, bw.Client, remotes.FireProjectile)
+			if ok and res and res.instance then projectileRemote = res.instance end
+		end
 	end)
 	local function getAmmo(check)
 		for _, item in store.inventory.inventory.items do
@@ -7124,7 +7293,7 @@ run(function()
 		end,
 	})
 	local list = {}
-	for _, v in bedwars.BedwarsKitSkin do
+	for _, v in (type(bedwars.BedwarsKitSkin) == 'table' and bedwars.BedwarsKitSkin or {}) do
 		if v.itemSkins then
 			if Names[v.name] then
 				for _, v2 in v.itemSkins do
@@ -7531,7 +7700,12 @@ run(function()
 		end
 	}
 	task.spawn(function()
-		projectileRemote = bedwars.Client:Get(remotes.FireProjectile).instance
+		waitBedwars(30)
+		local bw = getgenv().bedwars or bedwars
+		if bw and bw.Client and bw.Client.Get then
+			local ok, res = pcall(bw.Client.Get, bw.Client, remotes.FireProjectile)
+			if ok and res and res.instance then projectileRemote = res.instance end
+		end
 	end)
 	local function firePearl(pos, spot, item)
 		if Check.Enabled then
@@ -7687,7 +7861,7 @@ run(function()
 		if not bedwars.Store:getState().Game.customMatch and bedwars.Store:getState().Party.leader.userId == lplr.UserId and bedwars.Store:getState().Party.queueState == 0 then
 			if Random.Enabled then
 				local listofmodes = {}
-				for i, v in bedwars.QueueMeta do
+				for i, v in (type(bedwars.QueueMeta) == 'table' and bedwars.QueueMeta or {}) do
 					if not v.disabled and not v.voiceChatOnly and not v.rankCategory then
 						table.insert(listofmodes, i)
 					end
@@ -8356,7 +8530,7 @@ run(function()
 					task.wait()
 				until store.shopLoaded or not ShopTierBypass.Enabled
 				if ShopTierBypass.Enabled then
-					for _, v in bedwars.Shop.ShopItems do
+					for _, v in ((type(bedwars.Shop) == 'table' and bedwars.Shop.ShopItems) or {}) do
 						tiered[v] = v.tiered
 						nexttier[v] = v.nextTier
 						v.nextTier = nil
@@ -8966,11 +9140,11 @@ end)
 run(function()
 	local BlockCPSRemover
 	local CPS
-	local old = bedwars.SharedConstants.BLOCK_PLACE_CPS
+	local old = bedwars.SharedConstants and bedwars.SharedConstants.BLOCK_PLACE_CPS or 12
 	BlockCPSRemover = vape.Categories.World:CreateModule({
 		Name = 'Block CPS Remover',
 		Function = function(call)
-			bedwars.SharedConstants.BLOCK_PLACE_CPS = call and CPS.Value or old
+			if bedwars.SharedConstants then bedwars.SharedConstants.BLOCK_PLACE_CPS = call and CPS.Value or old end
 		end,
 		Tooltip = 'Changes place delay'
 	})
@@ -8980,7 +9154,7 @@ run(function()
 		Max = 100,
 		Default = 13,
 		Function = function(val)
-			if BlockCPSRemover.Enabled then
+			if BlockCPSRemover.Enabled and bedwars.SharedConstants then
 				bedwars.SharedConstants.BLOCK_PLACE_CPS = val
 			end
 		end,
@@ -9705,7 +9879,7 @@ run(function()
 		Default = true
 	})
 	local count = 0
-	for i, v in bedwars.TeamUpgradeMeta do
+	for i, v in (type(bedwars.TeamUpgradeMeta) == 'table' and bedwars.TeamUpgradeMeta or {}) do
 		local toggleCount = count
 		table.insert(UpgradeToggles, AutoBuy:CreateToggle({
 			Name = 'Buy ' .. (v.name == 'Armor' and 'Protection' or v.name),
@@ -10158,11 +10332,12 @@ run(function()
 					'diamond',
 					'emerald'
 				} do
-					createitem(v, bedwars.ItemMeta[v].image)
+					local meta = bedwars.ItemMeta and bedwars.ItemMeta[v]
+					createitem(v, meta and meta.image or '')
 				end
 				return
 			end
-			for i, v in bedwars.ItemMeta do
+			for i, v in (type(bedwars.ItemMeta) == 'table' and bedwars.ItemMeta or {}) do
 				if text:lower() == i:lower():sub(1, text:len()) then
 					if not v.image then
 						continue
@@ -10528,7 +10703,7 @@ run(function()
 					end)
 				end
 				bedwars.ClickHold.showProgress = function(self)
-					local roact = debug.getupvalue(oldshowprogress, 1)
+					local roact = safeGetUpvalue(oldshowprogress, 1, nil)
 					local countdown = roact.mount(roact.createElement('ScreenGui', {}, {
 						roact.createElement('Frame', {
 							[roact.Ref] = self.wrapperRef,
@@ -11915,7 +12090,7 @@ run(function()
 		Tooltip = 'Custom bed break effects'
 	})
 	local BreakEffectName = {}
-	for i, v in bedwars.BedBreakEffectMeta do
+	for i, v in (type(bedwars.BedBreakEffectMeta) == 'table' and bedwars.BedBreakEffectMeta or {}) do
 		table.insert(BreakEffectName, v.name)
 		NameToId[v.name] = i
 	end
@@ -12394,10 +12569,10 @@ run(function()
 			DefaultOpacity = 0.8,
 			Function = function(hue, sat, val, opacity)
 				local func = oldinvrender or HotbarOpenInventory.render
-				modifyconstant(debug.getupvalue(HotbarApp, 23).render, 51, tonumber(Color3.fromHSV(hue, sat, val):ToHex(), 16))
-				modifyconstant(debug.getupvalue(HotbarApp, 23).render, 58, tonumber(Color3.fromHSV(hue, sat, math.clamp(val > 0.5 and val - 0.2 or val + 0.2, 0, 1)):ToHex(), 16))
-				modifyconstant(debug.getupvalue(HotbarApp, 23).render, 54, 1 - opacity)
-				modifyconstant(debug.getupvalue(HotbarApp, 23).render, 55, math.clamp(1.2 - opacity, 0, 1))
+				do local _r = safeGetUpvalue(HotbarApp, 23, nil); _r = _r and _r.render or nil; if _r then modifyconstant(_r, 51, tonumber(Color3.fromHSV(hue, sat, val):ToHex(), 16)) end end
+				do local _r = safeGetUpvalue(HotbarApp, 23, nil); _r = _r and _r.render or nil; if _r then modifyconstant(_r, 58, tonumber(Color3.fromHSV(hue, sat, math.clamp(val > 0.5 and val - 0.2 or val + 0.2, 0, 1)):ToHex(), 16)) end end
+				do local _r = safeGetUpvalue(HotbarApp, 23, nil); _r = _r and _r.render or nil; if _r then modifyconstant(_r, 54, 1 - opacity) end end
+				do local _r = safeGetUpvalue(HotbarApp, 23, nil); _r = _r and _r.render or nil; if _r then modifyconstant(_r, 55, math.clamp(1.2 - opacity, 0, 1)) end end
 				modifyconstant(func, 31, tonumber(Color3.fromHSV(hue, sat, val):ToHex(), 16))
 				modifyconstant(func, 32, math.clamp(1.2 - opacity, 0, 1))
 				modifyconstant(func, 34, tonumber(Color3.fromHSV(hue, sat, math.clamp(val > 0.5 and val - 0.2 or val + 0.2, 0, 1)):ToHex(), 16))
@@ -12553,7 +12728,7 @@ run(function()
 		end
 	})
 	local KillEffectName = {}
-	for i, v in bedwars.KillEffectMeta do
+	for i, v in (type(bedwars.KillEffectMeta) == 'table' and bedwars.KillEffectMeta or {}) do
 		table.insert(KillEffectName, v.name)
 		NameToId[v.name] = i
 	end
@@ -12986,8 +13161,8 @@ run(function()
 			Name = 'Resize Health',
 			Function = function(callback)
 				modifyconstant(HotbarApp, 60, callback and 1 or nil)
-				modifyconstant(debug.getupvalue(HotbarApp, 15).render, 30, callback and 1 or nil)
-				modifyconstant(debug.getupvalue(HotbarApp, 23).tweenPosition, 16, callback and 0 or nil)
+				do local _r = safeGetUpvalue(HotbarApp, 15, nil); _r = _r and _r.render or nil; if _r then modifyconstant(_r, 30, callback and 1 or nil) end end
+				do local _t = safeGetUpvalue(HotbarApp, 23, nil); _t = _t and _t.tweenPosition or nil; if _t then modifyconstant(_t, 16, callback and 0 or nil) end end
 			end,
 			Default = true
 		})
@@ -12995,7 +13170,7 @@ run(function()
 			Name = 'No Hotbar Numbers',
 			Function = function(callback)
 				local func = oldinvrender or HotbarOpenInventory.render
-				modifyconstant(debug.getupvalue(HotbarApp, 23).render, 90, callback and 0 or nil)
+				do local _r = safeGetUpvalue(HotbarApp, 23, nil); _r = _r and _r.render or nil; if _r then modifyconstant(_r, 90, callback and 0 or nil) end end
 				modifyconstant(func, 71, callback and 0 or nil)
 			end,
 			Default = true
@@ -13048,7 +13223,9 @@ run(function()
 		UICleanup:CreateToggle({
 			Name = 'Fix Queue Card',
 			Function = function(callback)
-				modifyconstant(bedwars.QueueCard.render, 15, callback and 0.1 or nil)
+				if bedwars.QueueCard and bedwars.QueueCard.render then 				if type(bedwars.QueueCard) == 'table' and type(bedwars.QueueCard.render) == 'function' then
+					modifyconstant(bedwars.QueueCard.render, 15, callback and 0.1 or nil)
+				end end
 			end,
 			Default = true
 		})
@@ -13078,7 +13255,7 @@ run(function()
 		Tooltip = 'Allows you to select any clientside win effect'
 	})
 	local WinEffectName = {}
-	for i, v in bedwars.WinEffectMeta do
+	for i, v in (type(bedwars.WinEffectMeta) == 'table' and bedwars.WinEffectMeta or {}) do
 		table.insert(WinEffectName, v.name)
 		NameToId[v.name] = i
 	end
